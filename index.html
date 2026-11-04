@@ -11,6 +11,8 @@
 <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/pt.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 /* =====================================================================
@@ -723,7 +725,7 @@ function renderRegistros() {
       <div class="acoes-topo">
         <button class="btn btn-steel" id="bt-filtros">${ico('filter')} Filtros${filtrosAtivos ? ' (ativos)' : ''}</button>
         <div class="dropdown"><button class="btn btn-steel" id="bt-exportar">${ico('download')} Exportar ${ico('down')}</button>
-          <div class="dropdown-menu hidden" id="menu-exportar"><button data-exp="xlsx">Excel (.xlsx)</button><button data-exp="csv">CSV (.csv)</button></div></div>
+          <div class="dropdown-menu hidden" id="menu-exportar"><button data-exp="xlsx">Excel (.xlsx)</button><button data-exp="csv">CSV (.csv)</button><button data-exp="pdf">Relatório em PDF</button></div></div>
         ${ehAdmin() ? `<button class="btn btn-steel" id="bt-importar">${ico('upload')} Importar</button>` : ''}
         <button class="btn btn-steel" id="bt-adicionar">${ico('plus')} Adicionar</button>
       </div>
@@ -768,7 +770,7 @@ function renderRegistros() {
   $('#bt-filtros').onclick = () => { S.filtrosAbertos = !S.filtrosAbertos; $('#filtros').classList.toggle('hidden'); };
   $('#bt-adicionar').onclick = () => modalRegistro();
   $('#bt-exportar').onclick = ev => { ev.stopPropagation(); $('#menu-exportar').classList.toggle('hidden'); };
-  $$('[data-exp]').forEach(b => b.onclick = () => exportar(b.dataset.exp));
+  $$('[data-exp]').forEach(b => b.onclick = () => { $('#menu-exportar').classList.add('hidden'); b.dataset.exp === 'pdf' ? exportarPDF() : exportar(b.dataset.exp); });
   if ($('#bt-importar')) $('#bt-importar').onclick = importar;
   $$('[data-ord]').forEach(th => th.onclick = () => { const k = th.dataset.ord; S.ord = {k, d: S.ord.k === k ? -S.ord.d : (k.startsWith('data') || k === 'id' ? -1 : 1)}; renderRegistros(); });
   $$('[data-ver]').forEach(b => b.onclick = () => modalVer(+b.dataset.ver));
@@ -1025,6 +1027,77 @@ function exportar(tipo) {
   ws['!cols'] = [{wch: 6}, {wch: 10}, {wch: 10}, {wch: 14}, {wch: 14}, {wch: 12}, {wch: 12}, {wch: 70}];
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'SD Cards');
   XLSX.writeFile(wb, nome + (tipo === 'csv' ? '.csv' : '.xlsx'), tipo === 'csv' ? {bookType: 'csv', FS: ';'} : {});
+}
+
+function exportarPDF() {
+  if (!window.jspdf || !window.jspdf.jsPDF) return toast('Biblioteca de PDF não carregou. Verifique a internet.', true);
+  const doc = new window.jspdf.jsPDF({orientation: 'landscape', unit: 'mm', format: 'a4'});
+  if (typeof doc.autoTable !== 'function') return toast('Biblioteca de tabelas do PDF não carregou.', true);
+  const lista = registrosFiltrados();
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const placa = c => (S.veiculos.find(v => v.codigo === c) || {}).placa || '';
+
+  // Cabeçalho
+  try { doc.addImage($('.login-top img').src, 'PNG', 14, 9, 17, 17); } catch (e) {}
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(63, 63, 149);
+  doc.text('Viação Ideal — Relatório de Controle de SD Cards', 35, 16);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(110);
+  doc.text(`Gerado em ${fmtDataHora(new Date().toISOString())} por ${S.eu.nome || S.eu.usuario}`, 35, 22.5);
+  doc.setDrawColor(246, 134, 52); doc.setLineWidth(0.8); doc.line(14, 29, W - 14, 29);
+
+  // Filtros aplicados
+  const f = S.f, fl = [], snTxt = {'true': 'Sim', 'false': 'Não', 'null': 'Não informado'};
+  if (f.veiculo) fl.push('Veículo: ' + f.veiculo.toUpperCase());
+  if (f.de || f.ate) fl.push(`Defeito de ${f.de ? fmtData(f.de) : 'início'} até ${f.ate ? fmtData(f.ate) : 'hoje'}`);
+  if (f.reinc) fl.push('Reincidente: ' + snTxt[f.reinc]);
+  if (f.novo) fl.push('SD novo: ' + snTxt[f.novo]);
+  if (f.texto) fl.push(`Texto no relatório: "${f.texto}"`);
+  doc.setFontSize(9.5); doc.setTextColor(60);
+  doc.text(doc.splitTextToSize('Filtros: ' + (fl.length ? fl.join('  ·  ') : 'nenhum (todos os registros)'), W - 28), 14, 35.5);
+
+  // Resumo
+  const resumo = [
+    ['Registros', lista.length], ['Veículos', new Set(lista.map(r => r.veiculo)).size],
+    ['Trocas realizadas', lista.filter(r => r.data_troca).length], ['Trocas pendentes', lista.filter(r => !r.data_troca).length],
+    ['Reincidente = Sim', lista.filter(r => r.reincidente === true).length], ['SD Card novo = Sim', lista.filter(r => r.sd_novo === true).length]
+  ];
+  const gap = 4, bw = (W - 28 - gap * 5) / 6;
+  resumo.forEach(([rot, val], i) => {
+    const x = 14 + i * (bw + gap);
+    doc.setFillColor(244, 246, 248); doc.setDrawColor(225, 229, 233); doc.setLineWidth(0.2);
+    doc.roundedRect(x, 40, bw, 16, 1.5, 1.5, 'FD');
+    doc.setFontSize(8); doc.setTextColor(120); doc.text(rot.toUpperCase(), x + 3, 45.5);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(51); doc.text(String(val), x + 3, 52.8);
+    doc.setFont('helvetica', 'normal');
+  });
+
+  // Tabela
+  doc.autoTable({
+    startY: 61,
+    head: [['Nº', 'Veículo', 'Placa', 'Data defeito', 'Data troca', 'Reincidente', 'SD novo', 'Relatório técnico']],
+    body: lista.map(r => [r.id, r.veiculo, placa(r.veiculo), fmtData(r.data_defeito), fmtData(r.data_troca) || 'Pendente',
+      simNao(r.reincidente) || '—', simNao(r.sd_novo) || '—', r.descritivo || '']),
+    styles: {font: 'helvetica', fontSize: 8.5, cellPadding: 1.8, overflow: 'linebreak', textColor: 50, lineColor: [230, 230, 230], lineWidth: 0.1},
+    headStyles: {fillColor: [77, 109, 140], textColor: 255, fontStyle: 'bold'},
+    alternateRowStyles: {fillColor: [244, 244, 244]},
+    columnStyles: {0: {cellWidth: 12}, 1: {cellWidth: 20, fontStyle: 'bold'}, 2: {cellWidth: 20}, 3: {cellWidth: 22}, 4: {cellWidth: 22}, 5: {cellWidth: 22}, 6: {cellWidth: 18}, 7: {cellWidth: 'auto'}},
+    didParseCell: d => {
+      if (d.section !== 'body') return;
+      if (d.column.index === 5 && d.cell.raw === 'Sim') { d.cell.styles.textColor = [214, 110, 30]; d.cell.styles.fontStyle = 'bold'; }
+      if (d.column.index === 4 && d.cell.raw === 'Pendente') d.cell.styles.textColor = [150, 150, 150];
+    },
+    margin: {left: 14, right: 14, top: 14, bottom: 14}
+  });
+
+  // Rodapé com numeração
+  const n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) {
+    doc.setPage(i); doc.setFontSize(8); doc.setTextColor(140);
+    doc.text('Controle de SD Cards — Viação Ideal', 14, H - 7);
+    doc.text(`Página ${i} de ${n}`, W - 14, H - 7, {align: 'right'});
+  }
+  doc.save(`relatorio_sd_cards_${hojeISO()}.pdf`);
+  toast('Relatório PDF gerado.');
 }
 
 function importar() {
